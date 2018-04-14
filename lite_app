@@ -1,0 +1,117 @@
+#!/usr/bin/env perl
+use Mojolicious::Lite;
+
+use Mojo::Pg;
+use Mojo::JWT;
+use Mojo::File qw/path tempfile/;
+
+use Archive::Zip qw( :ERROR_CODES :CONSTANTS );
+use Archive::Unzip::Burst 'unzip';
+
+plugin 'Config';
+plugin 'Sendgrid';
+
+app->secrets(app->config('secrets') || [app->moniker]);
+
+hook before_dispatch => sub {
+  my $c = shift;
+  $c->session(expiration => 31536000); # keep sessions for a year
+  $c->app->static->paths([$c->app->home->child('public', $c->domain), $c->app->home->child('public', 'dropzone')]);
+  return unless $c->req->url->path->to_string eq '/';
+  my $default_index = path($c->app->static->paths->[0])->list->map('basename')->grep(qr/^index.html?/)->first;
+  $c->reply->static($default_index);
+};
+
+helper pg     => sub { state $pg = Mojo::Pg->new(app->config('pg')) };
+helper jwt    => sub {
+  Mojo::JWT->new(
+    expires => time + (app->config('jwt_timeout') || 86400),
+    secret => app->secrets->[0] || 's3cr3t',
+  );
+};
+helper domain => sub { ((split /:/, shift->req->headers->host)[0]) };
+
+app->pg->migrations->from_data->migrate;
+
+under '/dropzone' => sub {
+  my $c = shift;
+  return 0 unless -d $c->app->home->child('public', $c->domain);
+  my $site = $c->pg->db->select('sites', ['email'], {domain => $c->domain})->hash;
+  $c->stash(email => $site ? $site->{email} : '');
+  return 1 if $c->session($c->domain);
+  if ( $c->param('jwt') ) {
+    if ( my $claims = $c->jwt->decode($c->param('jwt')) ) {
+      return 0 unless $claims->{domain} eq $c->domain;
+      $c->session($claims->{domain} => 1);
+      return 1;
+    }
+  }
+  return 1 unless $site;
+  my $jwt = $c->jwt->claims({domain => $c->domain})->encode;
+  # TODO: Use a template
+  $c->sendgrid->mail(to => $site->{email}, from => sprintf('webhosting@%s', $c->domain), subject => sprintf('Webhosting for %s', $c->domain), html => sprintf('<a href="%s">Login</a>', $c->url_for('dropzone')->query(jwt => $jwt)->to_abs))->send;
+  $c->render(text => "email sent to $site->{email}"); # TODO: Obfuscate email
+  return 0;
+};
+get '/' => 'dropzone';
+get '/download' => sub {
+  my $c = shift;
+  my $zip = Archive::Zip->new();
+  $zip->addTree($c->app->home->child('public', $c->domain), '', sub { -f && -r } );
+  my $zipfile = tempfile(DIR => $c->app->home->child('public', $c->domain));
+  unless ( $zip->writeToFileNamed("$zipfile") == AZ_OK ) {
+    return $c->reply->not_found;
+  }
+  warn $zipfile;
+  $c->res->headers->content_type('application/zip');
+  $c->res->headers->content_disposition(sprintf 'attachment; filename="%s.zip"', $c->domain);
+  $c->reply->static($zipfile->basename);
+  unlink $zipfile;
+};
+post '/upload' => sub {
+  my $c = shift;
+  $c->pg->db->insert('sites', {domain => $c->domain, email => $c->param('email')}, {on_conflict => ['domain' => {email => $c->param('email')}]}) if $c->param('email');
+  my $domain = $c->req->headers->host;
+  my $upload = $c->req->upload('file');
+  return $c->reply->not_found unless $upload->headers->content_type eq 'application/zip';
+  my $tmp = tempfile;
+  $upload->move_to($tmp);
+  unzip($tmp, $c->app->static->paths->[0]);
+  unlink $tmp;
+  $c->render(json => {ok => 1});
+};
+
+app->start;
+
+__DATA__
+
+@@ migrations
+-- 1 up
+create table sites (domain varchar(255) unique not null, email varchar(255) not null);
+
+-- 1 down
+drop table if exists sites;
+
+@@ dropzone.html.ep
+<html>
+<head>
+<link rel="stylesheet" href="/dropzone.css">
+<link rel="stylesheet" href="/style.css">
+<script src="/dropzone.js"></script>
+</head>
+<body>
+Domain: <%= link_to $c->req->headers->host => '/' %><br />
+%= link_to "Download Website" => 'download'
+<div id="dropzone">
+<form action="/dropzone/upload" class="dropzone needsclick dz-clickable" id="demo-upload">
+  <div>
+    %= label_for email => 'Email'
+    %= email_field 'email' => $email
+    <div class="dz-message needsclick">
+      Drop files here or click to upload.<br>
+    </div>
+  </div>
+</form>
+</div>
+</body>
+</html>

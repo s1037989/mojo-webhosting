@@ -1,0 +1,5 @@
+*.conf
+*~
+public/*
+!public/localhost
+tmp/*
