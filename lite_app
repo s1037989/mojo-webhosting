@@ -73,7 +73,7 @@ post '/upload' => sub {
   $c->pg->db->insert('sites', {domain => $c->domain, email => $c->param('email')}, {on_conflict => ['domain' => {email => $c->param('email')}]}) if $c->param('email');
   my $domain = $c->req->headers->host;
   my $upload = $c->req->upload('file');
-  return $c->reply->not_found unless $upload->headers->content_type eq 'application/zip';
+  return $c->reply->not_found unless $upload->headers->content_type eq 'application/zip' || $upload->headers->content_type eq 'application/x-zip-compressed';
   my $tmp = tempfile;
   $upload->move_to($tmp);
   unzip($tmp, $c->app->static->paths->[0]);
