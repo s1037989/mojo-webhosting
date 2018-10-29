@@ -4,6 +4,8 @@ use Mojolicious::Lite;
 use Mojo::Pg;
 use Mojo::JWT;
 use Mojo::File qw/path tempfile/;
+use Mojo::ByteStream 'b';
+use Mojo::Util 'dumper';
 
 use Archive::Zip qw( :ERROR_CODES :CONSTANTS );
 use Archive::Unzip::Burst 'unzip';
@@ -17,24 +19,32 @@ hook before_dispatch => sub {
   my $c = shift;
   $c->session(expiration => 31536000); # keep sessions for a year
   $c->app->static->paths([$c->app->home->child('public', $c->domain), $c->app->home->child('public', 'dropzone')]);
-  return unless $c->req->url->path->to_string eq '/';
-  my $default_index = path($c->app->static->paths->[0])->list->map('basename')->grep(qr/^index.html?/)->first;
-  $c->reply->static($default_index);
+  return if $c->req->url->path->parts->[0] eq 'dropzone';
+  #my $default_index = path($c->app->static->paths->[0])->list->map('basename')->grep(qr/^index.html?/)->first;
+  my $redir = b(path($c->app->static->paths->[0])->sibling($c->domain.'.301')->slurp)->split("\n")->each(sub{$_=[split /\t/, $_]})->grep(sub{$_->[0] eq $c->req->url->path->trailing_slash(0)});
+  return $c->redirect_to($redir->first->[1]) if $redir->size;
+  my $static = path($c->app->static->paths->[0])->child(@{$c->req->url->path->parts})->tap(sub{-d and $_=$_->child('index.html')})->to_rel($c->app->static->paths->[0]);
+  $c->reply->static($static);
+};
+hook after_static => sub {
+  my $c = shift;
+  $c->res->headers->content_type('text/html;charset=UTF-8') if $c->res->headers->content_type =~ m!text/plain!;
 };
 
-helper pg     => sub { state $pg = Mojo::Pg->new(app->config('pg')) };
+helper pg     => sub { state $pg = Mojo::Pg->new(app->config('pg')) if app->config('pg') };
 helper jwt    => sub {
   Mojo::JWT->new(
     expires => time + (app->config('jwt_timeout') || 86400),
     secret => app->secrets->[0] || 's3cr3t',
   );
 };
-helper domain => sub { ((split /:/, shift->req->headers->host)[0]) };
+helper domain => sub { ((split /:/, shift->req->headers->host)[0]) =~ s/www\.//r };
 
-app->pg->migrations->from_data->migrate;
+app->pg->migrations->from_data->migrate if app->pg;
 
 under '/dropzone' => sub {
   my $c = shift;
+  return 0 unless $c->pg;
   return 0 unless -d $c->app->home->child('public', $c->domain);
   my $site = $c->pg->db->select('sites', ['email'], {domain => $c->domain})->hash;
   $c->stash(email => $site ? $site->{email} : '');
