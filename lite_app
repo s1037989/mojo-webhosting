@@ -21,8 +21,8 @@ hook before_dispatch => sub {
   $c->app->static->paths([$c->app->home->child('public', $c->domain), $c->app->home->child('public', 'dropzone')]);
   return if $c->req->url->path->parts->[0] eq 'dropzone';
   #my $default_index = path($c->app->static->paths->[0])->list->map('basename')->grep(qr/^index.html?/)->first;
-  my $redir = b(path($c->app->static->paths->[0])->sibling($c->domain.'.301')->slurp)->split("\n")->each(sub{$_=[split /\t/, $_]})->grep(sub{$_->[0] eq $c->req->url->path->trailing_slash(0)});
-  return $c->redirect_to($redir->first->[1]) if $redir->size;
+  my $redir = b(path($c->app->static->paths->[0])->sibling($c->domain.'.301')->slurp)->split("\n")->each(sub{$_=[split /\t/, $_]})->grep(sub{$_->[0] eq $c->req->url->path->trailing_slash(0)}) if -e path($c->app->static->paths->[0])->sibling($c->domain.'.301');
+  return $c->redirect_to($redir->first->[1]) if $redir && $redir->size;
   my $static = path($c->app->static->paths->[0])->child(@{$c->req->url->path->parts})->tap(sub{-d and $_=$_->child('index.html')})->to_rel($c->app->static->paths->[0]);
   $c->reply->static($static);
 };
