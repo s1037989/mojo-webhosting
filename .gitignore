@@ -3,3 +3,6 @@
 public/*
 !public/localhost
 tmp/*
+*.db
+cpanfile.snapshot
+local
